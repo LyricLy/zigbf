@@ -3,26 +3,18 @@ const ArrayList = std.ArrayList;
 const Allocator = *std.mem.Allocator;
 
 
-const InstTag = enum {
-    Add,
-    Move,
-    Input,
-    Output,
-    Loop,
-    Offset
-};
-
 const Mult = struct {
     offset: isize,
     mul: u8,
 };
 
-const Inst = union (InstTag) {
+const Inst = union (enum) {
     Add: u8,
     Move: isize,
     Input: void,
     Output: void,
-    Loop: Code,
+    JumpIf: usize,
+    JumpNot: usize,
     Offset: ArrayList(*Mult),
 };
 
@@ -80,7 +72,7 @@ fn parse_(program: *[*:0]u8, alloc: Allocator) Code {
                 var zero_offset: u8 = 0;
                 outer: for (inner.items) |i| {
                     switch (i) {
-                        InstTag.Add => |v| {
+                        Inst.Add => |v| {
                             if (pos == 0) {
                                 zero_offset +%= v;
                             } else {
@@ -95,13 +87,15 @@ fn parse_(program: *[*:0]u8, alloc: Allocator) Code {
                                 _ = offsets.append(m) catch unreachable;
                             }
                         },
-                        InstTag.Move => |v| { pos += v; },
+                        Inst.Move => |v| { pos += v; },
                         else => { failed = true; break; },
                     }
                 }
 
                 if (failed or pos != 0 or zero_offset != 255) {
-                    _ = code.append(Inst{ .Loop = inner }) catch unreachable;
+                    _ = code.append(Inst{ .JumpNot = inner.items.len + 1 }) catch unreachable;
+                    _ = code.appendSlice(inner.items) catch unreachable;
+                    _ = code.append(Inst{ .JumpIf = inner.items.len + 1 }) catch unreachable;
                 } else {
                     _ = code.append(Inst{ .Offset = offsets }) catch unreachable;
                 }
@@ -117,6 +111,22 @@ fn parse(program: []u8, alloc: Allocator) Code {
     return parse_(&@ptrCast([*:0]u8, program), alloc);
 }
 
+fn output_code(code: Code, stdout: std.io.Writer(std.fs.File, std.os.WriteError, std.fs.File.write)) void {
+    stdout.print("[", .{}) catch unreachable;
+    for (code.items) |c| {
+        switch (c) {
+            Inst.Add => |v| stdout.print("Add({}), ", .{ v }) catch unreachable,
+            Inst.Move => |v| stdout.print("Move({}), ", .{ v }) catch unreachable,
+            Inst.Input => stdout.print("Input, ", .{}) catch unreachable,
+            Inst.Output => stdout.print("Output, ", .{}) catch unreachable,
+            Inst.JumpIf => |v| stdout.print("JumpIf({}), ", .{ v }) catch unreachable,
+            Inst.JumpNot => |v| stdout.print("JumpNot({}), ", .{ v }) catch unreachable,
+            Inst.Offset => |_| stdout.print("Offset(...), ", .{}) catch unreachable,
+        }
+    }
+    stdout.print("]", .{}) catch unreachable;
+}
+
 
 fn au(x: isize) usize { return @intCast(usize, x); }
 
@@ -128,10 +138,13 @@ fn interpret_(
     stdout: std.io.Writer(std.fs.File, std.os.WriteError, std.fs.File.write),
 ) ArrayList(u8) {
     var mtape = tape;
-    for (code.items) |inst| {
+    var i: usize = 0;
+    while (i < code.items.len) {
+        var inst = code.items[i];
+        i += 1;
         switch (inst) {
-            InstTag.Add => |v| {  mtape.items[au(ptr.*)] +%= v; },
-            InstTag.Move => |v| {
+            Inst.Add => |v| {  mtape.items[au(ptr.*)] +%= v; },
+            Inst.Move => |v| {
                 ptr.* += v;
                 if (ptr.* >= mtape.items.len) {
                     var d = au(ptr.*) - (mtape.items.len-1);
@@ -145,14 +158,15 @@ fn interpret_(
                     std.os.exit(1);
                 }
             },
-            InstTag.Input => mtape.items[au(ptr.*)] = stdin.readByte() catch 0,
-            InstTag.Output => stdout.writeByte(mtape.items[au(ptr.*)]) catch unreachable,
-            InstTag.Loop => |c| {
-                while (mtape.items[au(ptr.*)] != 0) {
-                    mtape = interpret_(c, ptr, mtape, stdin, stdout);
-                }
+            Inst.Input => mtape.items[au(ptr.*)] = stdin.readByte() catch 0,
+            Inst.Output => stdout.writeByte(mtape.items[au(ptr.*)]) catch unreachable,
+            Inst.JumpIf => |i_| {
+                if (mtape.items[au(ptr.*)] != 0) i -= i_;
             },
-            InstTag.Offset => |offsets| {
+            Inst.JumpNot => |i_| {
+                if (mtape.items[au(ptr.*)] == 0) i += i_;
+            },
+            Inst.Offset => |offsets| {
                 const v = mtape.items[au(ptr.*)];
                 if (v == 0) continue;
                 mtape.items[au(ptr.*)] = 0;
@@ -191,6 +205,6 @@ pub fn main() !void {
     _ = argiter.skip();
     const filename = try argiter.next(alloc).?;
     const code = parse(try std.fs.cwd().readFileAlloc(alloc, filename, 10000000000), alloc);
-    //output_code(code);
+
     interpret(alloc, code);
 }
